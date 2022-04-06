@@ -1,7 +1,90 @@
 
 
-using FITSIO
 using DataFitting
+using Interpolations, ImageCore, ImageTransformations , TestImages
+using CoordinateTransformations, Rotations, StaticArrays
+using Images
+using Flux
+using MultivariatePolynomials
+
+"""
+    Poly2D(order::Int,refpix::Tuple{Int,Int},coef::AbstractVector{AbstractVector{Float64}})
+
+Structure containing a 2D polynomial of arbitrary order. 
+coef is like : ax^2,bxy,cy^2,dx,ey,f (for Order = 2)
+refpix is a reference pixel for mapping
+"""
+mutable struct Poly2D
+    order::Int  # order of the polynomial
+    refpix::Tuple{Int,Int}   # reference pixel  
+    coef::AbstractVector{AbstractVector{Float64}} #polynomials coeficients  as [ax^2,bxy,cy^2],[dx,ey],[f] (for Order = 2)
+end
+
+"""
+    (self::Poly2D)(x::Float,y::Float)
+
+compute the value of the polyomial Poly2D at coordinates (x,y)
+
+Example:
+
+D = Poly2D(order,refpix,coef)
+z = D(x,y)
+"""
+function (self::Poly2D)(x::Float64,y::Float64)
+    result = 0
+    Coef = self.coef
+    for i in 0:1:size(Coef)[1]-1
+        for j in 0:1:size(Coef[i+1])[1]-1
+            result += Coef[i+1][j+1]*x^(size(Coef[i+1])[1]-1-j)*y^(j)
+        end
+    return result
+    end
+end
+
+"""
+    RandCoef(order::Int)
+
+Generate random coeficient to create a Poly2D object
+"""
+function RandCoef(order::Int)
+    coef = []
+    for i in 0:1:order
+        push!(coef,rand(Float64,(order-i+1)))
+    end
+    return coef
+end
+
+"""
+    Poly2D(order::Int,refpix::Tuple{Int,Int})
+
+Generation of Poly2D object with semi random coeficient
+"""
+Poly2D(order::Int,refpix::Tuple{Int,Int})=Poly2D(order::Int,refpix::Tuple{Int,Int},RandCoef(order))
+
+"""
+    Contrast(Image::Matrix{Float64},Dim::Int)
+
+Return the constrast of an image squared along the dimension Dim
+"""
+function Contrast(Image::Matrix{Float64},Dim::Int)
+    f(x) = x^2
+    return sum(f,Image,dims=Dim)
+end
+
+
+
+"""
+Return a warped tranformed with the 2D Polynomial associated with Poly
+"""
+function ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
+
+    ϕ(x) = (Poly1(x[1],x[2]),Poly2(x[1],x[2]))
+    Y = warp(image,ϕ,parent(image))
+
+    return Y
+end
+
+
 
 """
     function CreateToySlitlet()
@@ -14,8 +97,6 @@ Return two fake SINFONI slitlet mimiquing FIBRE and WAVE slitlet
 """
 function CreateToySlitlet()
 
-    
-    
     #Actual SINFONI slitlet dimensions
     Dimx = 64
     Dimλ = 2048
@@ -66,13 +147,10 @@ end
 
 usage : DeformedSlitlet,Coeff = DeformSlitlet(OriginalSlitlet, [Coeff = rand(Float64,(4,3))])
 
-Return a deformed slitlet. 
+Return a deformed slitlet using circular permutation. And the coeficients used for deformation 
 """
 function DeformSlitlet(Slitlet, Coeff = rand(Float64,(4,3)))
 
-    #Coeficients of deformation
-
-    #Deformation Functions :
 
     #Bending functions 
     Bendλ(λ) = (λ^2)*Coeff[1,1]*0 + (λ/100)*Coeff[1,2] + 10Coeff[1,3]
@@ -160,12 +238,43 @@ function PolynomFitRow(PolyArray)
 end
 
 
-FakeFibre, FakeWave = CreateToySlitlet()
-using Images
-Gray.(FakeWave)
-Gray.(FakeFibre)
-FakeWaveDist,Coeffs  = DeformSlitlet(FakeWave)
-FakeFibreDist,Coeffs  = DeformSlitlet(FakeFibre,Coeffs)
-Gray.(FakeWaveDist)
-Gray.(FakeFibreDist)
-result = GaussFitRow(FakeFibre)
+"""
+    oldmain()
+
+Obsolete Toy Model
+"""
+function oldmain()
+
+    FakeFibre, FakeWave = CreateToySlitlet() #Create the slitlets
+
+    #Deform the image with circular permutation and random coeficient
+    FakeWaveDist,Coeffs  = DeformSlitlet(FakeWave) 
+
+    #Deform the image with circular permutation and the previous coeficient
+    FakeFibreDist,Coeffs  = DeformSlitlet(FakeFibre,Coeffs)
+
+    CenterPos = GaussFitRow(FakeFibre) #Return an array of the position of each gaussian center 
+
+    PolyCoef = PolynomFitRow(PolyArray) #Return the coeficient of the polynomial associated
+
+end
+
+"""
+    main()
+    
+Toy Model
+"""
+function main()
+
+    FakeFibre, FakeWave = CreateToySlitlet() #Create the slitlets
+    
+    #Generate 2 2DPolynomials with semi random coefiscients
+    Poly1 = Poly2D(3,(0,0))
+    Poly2 = Poly2D(3,(0,0))
+
+    #Deform the images with ImageTransformations.warp -->  DOESNT WORK SEND HELP PLS
+    DeformedFakeFibre = ImageWarp(FakeFibre,Poly1,Poly2)
+    DeformedFakeWave = ImageWarp(FakeWave,Poly1,Poly2)
+
+
+end
