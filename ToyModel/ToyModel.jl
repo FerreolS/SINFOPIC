@@ -10,8 +10,13 @@ using FileIO
 using FITSIO
 using LsqFit
 using Random, Distributions
-using ForwardDiff
-
+using InterpolationKernels
+using OptimPackNextGen
+using EasyFITS
+using OptimPackNextGen.Powell
+using LocalFilters
+using StatsBase
+using ImageFiltering
 
 
 
@@ -152,8 +157,41 @@ Return the constrast of an image along the dimension Dim normalized by image len
 function Contrast(image::Matrix{Float64},dim::Int)
     return sum(image,dims=dim) #./ size(image)[dim]
 end
+function Contrast(image::Matrix{Float32},dim::Int)
+    return sum(image,dims=dim) #./ size(image)[dim]
+end
 
 
+"""
+    BadPixMap(fibre::Matrix{Float64},wave::Matrix{Float64})
+
+Return a simple bad pixel map from fibre and wave frames. (bad pixels are flagged with 0 weight when outside a median filter) 
+"""
+function BadPixMap(fibre::Matrix{Float64},wave::Matrix{Float64})
+    #bad pixel map for fibre
+    for i in 1:size(fibre)[1]
+        dam = mad(fibre[i,:])
+        med = median(fibre[i,:])
+        tresh = med + 5*dam
+        for j in 1:size(fibre)[2]
+            if fibre[i,j] > tresh
+                badfibre[i,j] = 0.
+            end
+        end
+    end
+    #bad pixel map for wave
+    for j in 1:size(wave)[2]
+        dam = mad(wave[:,j])
+        med = median(wave[:,j])
+        tresh = med + 5*dam 
+        for i in 1:size(wave)[1]
+            if wave[i,j] > tresh
+                badwave[i,j] = 0.
+            end
+        end
+    end
+    return badfibre,badwave
+end
 
 """
 Return a warped tranformed with the 2D Polynomial associated with Poly
@@ -161,10 +199,80 @@ Return a warped tranformed with the 2D Polynomial associated with Poly
 function ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D,axes::Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}})
 
     ϕ(x) = (Poly1(x[1],x[2]),Poly2(x[1],x[2]))
-    Y = warp(image,ϕ,axes,fillvalue=0.,method=BSpline(Linear()))
+    Y = warp(image,ϕ,axes,fillvalue=0.,method=Interpolations.BSpline(Linear()))
 
     return Y
 end
+
+"""
+Return a warped tranformed with the 2D Polynomial associated with Poly
+"""
+function ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
+
+    ϕ(x) = (Poly1(x[1],x[2]),Poly2(x[1],x[2]))
+    ker = CatmullRomSpline()    
+    I = size(image)[1]
+    J = size(image)[2]
+    imwarped = zeros(I,J)
+    range = 5
+    @inbounds for j in 1:J-1
+        for i in 1:I-1
+            l,m = ϕ((i,j))
+            #println("l-i = $(l-i), m-j = $(m-j)")
+            dl = Int(floor(l))-range
+            dm = Int(floor(m))-range
+            ul = Int(ceil(l))+range
+            um = Int(ceil(m))+range
+            for a in max(1,dm):min(J-1,um)
+                for b in max(1,dl):min(I-1,ul)
+                    distance = sqrt(((l-b)^2)+((m-a)^2)) 
+                    s = ker(distance)*wgt[b,a]*image[b,a]
+                    #println("distance = $distance, s= $s,image[b,a] = $(image[b,a]), image[i,j] = $(image[i,j]) ")
+                    imwarped[i,j] += s
+                end
+            end
+        end
+    end
+
+
+
+    return imwarped
+end
+
+"""
+To be done
+"""
+function OperatorConstruct(wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
+
+    ϕ(x) = (Poly1(x[1],x[2]),Poly2(x[1],x[2]))
+    ker = CatmullRomSpline()    
+    I = size(wgt)[1]
+    J = size(wgt)[2]
+    A = size(wgt)[1]
+    B = size(wgt)[2]
+    println(size(wgt))
+    operator = zeros(I,J,A,B)
+    range = 5
+    for j in 1:J-1
+        for i in 1:I-1
+            l,m = ϕ((i,j))
+            #println("l-i = $(l-i), m-j = $(m-j)")
+            for b in 1:B-1
+                for a in 1:A-1
+                    distance = sqrt(((l-b)^2)+((m-a)^2)) 
+                    s = ker(distance)*wgt[b,a]
+                    #println("distance = $distance, s= $s,image[b,a] = $(image[b,a]), image[i,j] = $(image[i,j]) ")
+                    operator[i,j,a,b] += s 
+                end
+            end
+        end
+    end
+
+
+
+    return imwarped
+end
+
 
 """
     function CreateTestSlitlet()
@@ -408,7 +516,7 @@ function PolynomFitRow(PolyArray)
     filter!(x-> 0. <=x<= 128. ,PolyArray) #Filter out spurious values
 
     polynome(x,a,b,c) = @. (a*x^2+b*x+c)  #Polynomial to be fitted
-    params = [0.,0.,0.]                    #Parameters of above polinomial [a,b,c]
+    params = [0.,0.,0.]                   #Parameters of above polinomial [a,b,c]
 
 
     #Polynomial least square fitting
@@ -447,6 +555,37 @@ end
 Return the raynumber number of gaussian peak index in contrast vector by flatenning contrast around each found peak in the range range.  
 """
 function RayFinding(contrast::Vector{Float64},range::Int64,raynumber::Int64)
+
+
+    contrastbis = copy(contrast)
+    println()
+    ind = zeros(Int64,raynumber)
+    val = zeros(Float64,raynumber)
+
+    for i in 1:raynumber
+        ind[i] = findmax(contrastbis)[2]
+        val[i] = findmax(contrastbis)[1]
+
+        lowerbound = ind[i]-range
+        upperbound = ind[i]+range
+        if ind[i]-range < 1
+            lowerbound = 1
+        end
+        if ind[i]+range > size(contrastbis)[1]
+            upperbound = size(contrastbis)[1]
+        end
+        contrastbis[lowerbound:upperbound] .= 0.
+    end
+    return sort(ind)
+end
+
+
+"""
+    RayFinding(contrast::Vector{Float32},range::Int64,raynumber::Int64)
+
+Return the raynumber number of gaussian peak index in contrast vector by flatenning contrast around each found peak in the range range.  
+"""
+function RayFinding(contrast::Vector{Float32},range::Int64,raynumber::Int64)
 
 
     contrastbis = copy(contrast)
@@ -529,35 +668,41 @@ end
 
 Find the polynomials allowing image to be rectified
 """
-function MinCriteria(image::Matrix{Float64},image2::Matrix{Float64},order::Int64,refpix::Tuple{Int,Int},imageref::Matrix{Float64},imageref2::Matrix{Float64};fitswriting = false)
+function MinCriteria(image::Matrix{Float64},image2::Matrix{Float64},wgt::Matrix{Float64},order::Int64,refpix::Tuple{Int,Int},imageref::Matrix{Float64},imageref2::Matrix{Float64};fitswriting = false)
 
     peaknumber = 10
     iterator = 0
+
+    #Get info once for all
     dim1λ = size(image)[1]
     dim1x = size(image)[2]
-
     dim2λ = size(image)[1]
     dim2x = size(image)[2]
 
+
+    #Reference contrast
     contrastref = vec(Contrast(imageref2,2))
     axess = axes(image)
     centerwave = RayFinding(contrastref,10,peaknumber)
 
+    #Total signal
     sumfibre = sum(image)
     sumwave = sum(image2)
 
-
-
+    #Form identity polynomials and coefiscient
     polyidx =  Poly2D(order,refpix)
     polyidy =  Poly2D(order,refpix)
     CoefConstraintIdentity!(polyidx,1)
     CoefConstraintIdentity!(polyidy,2)
     coefidentity1 = vec(convert(Vector{Float64},copy(polyidx.coef)))
     coefidentity2 = vec(convert(Vector{Float64},copy(polyidy.coef)))
-
-    genmap = polyidx.map
-    
     coefidentity = vec(convert(Vector{Float64},[polyidx.coef; polyidy.coef]))
+    genmap = polyidx.map
+
+    #Preform deformation polynomials ( so that only the coefiscients are to be updated afterward)
+    Poly1 = Poly2D(order,refpix)
+    Poly2 = Poly2D(order,refpix)
+ 
 
     #Poping zeroth order and undesirable degrees of freedom
     #pop!(coefidentity1)
@@ -567,10 +712,7 @@ function MinCriteria(image::Matrix{Float64},image2::Matrix{Float64},order::Int64
     #coefidentity1 .= 0. 
     #coefidentity1 .= 0. 
 
-    
-
-
-    
+       
     #Minimisation characteristics (box's limit, starting point and algorithm)   
     coefmapsum = append!(vec(polyidx.map[1] .+ polyidx.map[2]),vec(polyidy.map[1] .+ polyidy.map[2]))
     bounds = Array{Tuple{Float64, Float64}}(undef, 0)
@@ -583,6 +725,7 @@ function MinCriteria(image::Matrix{Float64},image2::Matrix{Float64},order::Int64
     end
     println("bounds = $bounds")
 
+    #Minimisation parameters
     initial_x = coefidentity
     precisionfibre = 1e-1
     precisionwave = precisionfibre*1e-5
@@ -855,13 +998,14 @@ function MinFibre(coefvector::Vector{Float64})
 
     #Creating polynomials
     Poly1 = polyidx
-    Poly2 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
+    #Poly2 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
+    Poly2.coef =  vec(coefvectorcopy)
 
 
 
 
     #Deforming image
-    deformedimage = ImageWarp(image,Poly1,Poly2,axess)
+    deformedimage = ImageWarp2(image,wgt,Poly1,Poly2)
     #Calculating criteria of minimisation
 
 
@@ -931,7 +1075,8 @@ function MinWave(coefvector::Vector{Float64})
 
 
     #Creating polynomials
-    Poly1 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
+    #Poly1 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
+    Poly1.coef =  vec(coefvectorcopy)
     Poly2 = polyidy
 
 
@@ -941,7 +1086,7 @@ function MinWave(coefvector::Vector{Float64})
 
 
     #Deforming image
-    deformedimage = ImageWarp(image2,Poly1,Poly2,axess)
+    deformedimage = ImageWarp2(image2,wgt,Poly1,Poly2)
     #Calculating criteria of minimisation
 
     contrast = vec(Contrast(deformedimage,2))
@@ -985,11 +1130,11 @@ end
 
     println("initial1 = $coefidentity1, initial2 = $coefidentity2")
     #Minimisation
-    #res1 = optimize(MinFibre, coefidentity2, inner_optimizer, Optim.Options(g_tol = precisionfibre, store_trace = false, show_trace = false))
-    #res2 = optimize(MinWave, coefidentity1, inner_optimizer, Optim.Options(g_tol = precisionwave, store_trace = false, show_trace = false))
-    #res = [res1;res2]
+    res1 = optimize(MinFibre, coefidentity2, inner_optimizer, Optim.Options(g_tol = precisionfibre, store_trace = false, show_trace = false))
+    res2 = optimize(MinWave, coefidentity1, inner_optimizer, Optim.Options(g_tol = precisionwave, store_trace = false, show_trace = false))
+    res = [res1;res2]
 
-    res = optimize(MinCoupled, [coefidentity1;coefidentity2], inner_optimizer, Optim.Options(g_tol = precisionfibre, store_trace = false, show_trace = false, iterations = 10000))
+    #res = optimize(MinCoupled, [coefidentity1;coefidentity2], inner_optimizer, Optim.Options(g_tol = precisionfibre, store_trace = false, show_trace = false, iterations = 10000))
 
     """
     res = bboptimize(Min2,initial_x; Method=:borg_moea,
@@ -1090,11 +1235,11 @@ end
 
 
 """
-    main()
+    main2()
 
-Toy Model
+Toy Model (detector to sky version)
 """
-function main()
+function main2()
 
     timestart = time()
 
@@ -1153,6 +1298,7 @@ function main()
     AddOutlier!(DeformedFakeWave,outlier_frec,outlier_amp)
     """
 
+    wgtmap = ones(size(FakeFibre)[1],size(FakeFibre)[2])
 
     Poly1 = Poly2D(order,refpix,coef1)
     Poly2 = Poly2D(order,refpix,coef2)
@@ -1244,7 +1390,7 @@ function main()
     """
 
 
-    minimisation = MinCriteria(DeformedFakeFibre,DeformedFakeWave,order,refpix,FakeFibre,FakeWave;fitswriting = true)
+    minimisation = MinCriteria(DeformedFakeFibre,DeformedFakeWave,wgtmap,order,refpix,FakeFibre,FakeWave;fitswriting = true)
     
     #Reinserting constant 
     #push!(Optim.minimizer(minimisation[1]),1.)
@@ -1327,5 +1473,446 @@ function main()
 
     return minimisation
 
+
+end
+
+
+"""
+    function projection(::Val{:proj},
+        pos::AbstractVector, # output positions
+        wgt::AbstractMatrix, # weights of data
+        dat::AbstractMatrix, # data
+        ker,         # interpolation kernel
+        coord;       # coordinate function called as coord(i,j)
+        support=10)
+
+Example:
+    p = projection(Val(:proj), 1:200, wgt, img, CatmullRomSpline{Float64}(),
+                   (i,j) -> 3.0*i - 2.5 + 0.01*j)
+    I = find_peaks(p; nmax=30)
+"""
+function projection(::Val{:proj},
+                    pos::AbstractVector, # output positions
+                    wgt::AbstractMatrix, # weights of data
+                    dat::AbstractMatrix, # data
+                    ker,         # interpolation kernel
+                    coord;       # coordinate function called as coord(i,j)
+                    support=10)
+    axes(wgt) == axes(dat) || error("incompatible indices")
+    I, J = axes(dat)
+    len = length(pos)
+    A = zeros(Float64, len)
+    B = zeros(Float64, len)
+    axes(pos) == (1:len,) || error("non-standard indices not supported")
+    @inbounds for j in J
+        for i in I
+            x = coord(i,j)
+#            for k in 1:len
+#            for k in max(1,Int(floor(x))-10):min(len,Int(ceil(x))+10)
+            pfirst = searchsortedfirst(pos,x-support)
+            plast = searchsortedlast(pos,x+support)
+            for (k,p) in enumerate(pos[pfirst:plast])
+                w = ker(x - p)*wgt[i,j]
+                A[k+pfirst-1] += w
+                B[k+pfirst-1] += w*dat[i,j]
+            end
+        end
+    end
+    @inbounds for k in eachindex(A, B)
+        if A[k] != 0
+            B[k] /= A[k]
+        else
+            B[k] = 0
+        end
+    end
+    return B
+end
+
+"""
+    projection(::Val{:matched},
+                        pos::AbstractVector, # output positions
+                        wgt::AbstractMatrix, # weights of data
+                        dat::AbstractMatrix, # data
+                        ker,         # footprint
+                        coord)       # coordinate function called as coord(i,j)
+"""
+function projection(::Val{:matched},
+                    pos::AbstractVector, # output positions
+                    wgt::AbstractMatrix, # weights of data
+                    dat::AbstractMatrix, # data
+                    ker,         # footprint
+                    coord)       # coordinate function called as coord(i,j)
+    axes(wgt) == axes(dat) || error("incompatible indices")
+    I, J = axes(dat)
+    len = length(pos)
+    A = zeros(Float64, len)
+    B = zeros(Float64, len)
+    axes(pos) == (1:len,) || error("non-standard indices not supported")
+    @inbounds for j in J
+        for i in I
+            x = coord(i,j)
+            for k in 1:len
+                phi = ker(x - pos[k])
+                w = wgt[i,j]*phi
+                A[k] += w*phi
+                B[k] += w*dat[i,j]
+            end
+        end
+    end
+    @inbounds for k in eachindex(A, B)
+        if A[k] != 0
+            B[k] /= sqrt(A[k])
+        else
+            B[k] = 0
+        end
+    end
+    return B
+end
+
+"""
+    find_peaks!(vect::AbstractVector{<:Real};
+                        dist::Integer = 5,
+                        rtol::Real = 0.1,
+                        atol::Real = 0.0,
+                        nmax::Integer = typemax(Int))
+
+    find_peaks!(vect) -> inds
+yields the indices of the most significant local maxima found in vector `vect`
+destroying the contents of `vect` in the process.  The indices are returned in
+decreasing order of peak heights.
+The following keywords can be used to tune the algorithm:
+* `dist` (5 by default) specifies the minimal distance (in indices units)
+  between two peaks.
+* `atol` (0.0 by default) and `rtol` (0.1 by default) specify the absolute and
+  relative tolerances for the detection threshold.  If `atol` is NaN, the
+  detection threshold is `rtol*maximum(vect)`; otherwise, the detection
+  threshold is `max(atol, rtol*maximum(vect))`.  All selected peaks have values
+  greater or equalt the detection threshold.
+* `nmax` (no limits by default) specifies the maximum number of peaks to
+  detect.
+Call `find_peaks` to avoid overwriting `vect`.
+"""
+function find_peaks!(vect::AbstractVector{<:Real};
+                     dist::Integer = 5,
+                     rtol::Real = 0.1,
+                     atol::Real = 0.0,
+                     nmax::Integer = typemax(Int))
+    dist ≥ 1 || error("minimal distance must be ≥ 1")
+    0 ≤ rtol ≤ 1 || error("invalid relative threshold")
+
+    dst = Int(dist) - 1
+    vmin = typemin(eltype(vect))
+    vtol = float(atol)
+    I = axes(vect, 1)
+    I_first, I_last = first(I), last(I)
+    inds = Int[]
+    while length(inds) < nmax
+        vmax, imax = findmax(vect)
+        if length(inds) < 1
+            # Compute selection threshold.
+            v = oftype(vtol, rtol*vmax)
+            if isnan(vtol)
+                vtol = v
+            else
+                vtol = max(vtol, v)
+            end
+        end
+        vmax ≥ vtol || break
+        push!(inds, imax)
+        @inbounds for i in max(I_first, imax - dst):min(I_last, imax + dst)
+            vect[i] = vmin
+        end
+    end
+    return inds
+end
+
+"""
+    find_peaks(vect) -> inds
+yields the indices of the most significant local maxima found in vector `vect`.
+See `find_peaks!` for a list of accepted keywords.
+"""
+find_peaks(vect::AbstractVector, args...; kwds...) =
+    find_peaks!(copy(vect), args...; kwds...)
+
+
+function deprojection(proj::AbstractVector, # projection
+                    imgAxes::Tuple{AbstractRange,AbstractRange},
+                    ker,         # interpolation kernel
+                    coord;       # coordinate function called as coord(i,j)
+                    support=10)
+   deprojection(proj,imgAxes,ker,coord,1:length(proj); support=support)
+end
+
+function deprojection(proj::AbstractVector, # projection
+                    imgAxes::Tuple{AbstractRange,AbstractRange},
+                    ker,         # interpolation kernel
+                    coord,       # coordinate function called as coord(i,j)
+                    indices::AbstractRange;
+                    support=10)
+    I, J = imgAxes
+    len = length(proj)
+    img = zeros(imgAxes)
+    axes(indices) == axes(proj) || error("incompatible indices")
+    @inbounds for j in J
+        for i in I
+            x = coord(i,j)
+            pfirst = searchsortedfirst(indices,x-support)
+            plast = searchsortedlast(indices,x+support)
+
+            for (k,p) in enumerate(indices[pfirst:plast])
+                img[i,j] += ker(x -p )*proj[k + pfirst-1]
+            end
+        end
+    end
+    return img
+end
+
+
+"""
+    GaussianModel(fwhm::Float64, x::Real)
+Compute the value at position sqrt(x) 1D centered Gaussian
+* `fwhm` : full-width at half maximum
+* `x`:   sqrt sampled position
+"""
+function GaussianModel(fwhm, x::T) where (T<:Real)
+    local fwhm2sigma =T(1 / (2 * sqrt(2 * log( 2))))*T(fwhm)
+    return exp(-x / (2 * (fwhm2sigma )^2));
+end
+
+"""
+    GaussianModel2(fwhm::Float64, x::Real)
+Compute the value at position x 1D centered Gaussian
+* `fwhm` : full-width at half maximum
+* `x`:   sampled position
+"""
+function GaussianModel2(fwhm, x::T) where (T<:Real)
+    local fwhm2sigma =T(1 / (2 * sqrt(2 * log( 2))))*T(fwhm)
+    return exp(-x^2 / (2 * (fwhm2sigma )^2));
+end
+
+
+"""
+    SlitletLoad(fitsname,directory,xmin::Int64,xmax::Int64,ymin::Int64,ymax::Int64)
+
+Load a slitlet from disk
+"""
+
+function SlitletLoad(fitsname,directory,xmin::Int64,xmax::Int64,ymin::Int64,ymax::Int64)
+    name = directory*fitsname*".fits"
+    #image = read(FitsImage, name)
+
+    f = FITS(name)
+    img = read(f[1], xmin:xmax,ymin:ymax)
+    return img
+
+
+end
+
+function main()
+
+    directory = "/home/unahzaal/Documents/StageM2/SINFONI_DHTAUB/reduceddatadirty/DH_TAU_B/06-11-2007/Step4/"
+    fitsnamewave = "out_wcal_stack_0000"
+    fitsnamefibre = "out_ns_stack_0000"
+    
+    fibre = SlitletLoad(fitsnamefibre,directory,519,582,5,2000)
+    wave = SlitletLoad(fitsnamewave,directory,519,582,5,2000)
+
+    badfibre = Array{Float64, 2}(undef, size(fibre))
+    badwave = Array{Float64, 2}(undef, size(wave))
+
+    badfibre .= 1.
+    badwave .= 1.
+
+    #bad pixel map
+    for i in 1:size(fibre)[1]
+        dam = mad(fibre[i,:])
+        med = median(fibre[i,:])
+        tresh = med + 5*dam
+        for j in 1:size(fibre)[2]
+            if fibre[i,j] > tresh
+                badfibre[i,j] = 0.
+            end
+        end
+    end
+    for j in 1:size(wave)[2]
+        dam = mad(wave[:,j])
+        med = median(wave[:,j])
+        tresh = med + 5*dam 
+        for i in 1:size(wave)[1]
+            if wave[i,j] > tresh
+                badwave[i,j] = 0.
+            end
+        end
+    end
+
+    #filtering for finding position
+    fibref = mapwindow(median, fibre, (1,11))
+    wavef = mapwindow(median, wave, (11,1))
+    centerwave = RayFinding(vec(Contrast(wavef,2)),20,10)
+
+
+
+    twave = transpose(wave)
+    tbadwave = transpose(badwave)
+
+    function pcostfibre(x)
+        p  = projection(Val(:proj), 1:64, badfibre, fibre, CatmullRomSpline(),(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j);
+        return -sum(p[[32,33]])
+    end
+    function pcostwave(x)
+        p  = projection(Val(:proj), 1:1994, tbadwave, twave, CatmullRomSpline(),(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j);
+        return -sum(p[centerwave])
+    end
+
+
+ 
+    x = [0.,0.,0.]
+    rhoend = 1e-6
+
+    minfibre = newuoa!(pcostfibre, x, 10.,  rhoend; verbose = 2, maxeval = 5000, check = false)
+    minwave = newuoa!(pcostwave, x, 10.,  rhoend; verbose = 2, maxeval = 5000, check = false)
+
+    x = minfibre[2]
+    pfibre  = projection(Val(:proj), 1:64, badfibre, fibre, CatmullRomSpline(),(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j )
+    x = minwave[2]
+    pwave  = projection(Val(:proj), 1:1994, badwave, wave, CatmullRomSpline(),(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j)
+
+    x = minfibre[2]
+    reffibre = deprojection(pfibre,(1:64,1:1994),CatmullRomSpline(),(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j)
+    f = FITS("ToyModelImages/fibre.fits", "w")
+    write(f,fibre)
+    close(f)
+    f = FITS("ToyModelImages/wave.fits", "w")
+    write(f,wave)
+    close(f)
+    f = FITS("ToyModelImages/fibref.fits", "w")
+    write(f,fibref)
+    close(f)
+    f = FITS("ToyModelImages/wavef.fits", "w")
+    write(f,wavef)
+    close(f)
+    f = FITS("ToyModelImages/reffibre.fits", "w")
+    write(f,reffibre.parent)
+    close(f)
+    f = FITS("ToyModelImages/pfibre.fits", "w")
+    write(f,pfibre)
+    close(f)
+    f = FITS("ToyModelImages/pwave.fits", "w")
+    write(f,pwave)
+    close(f)
+    f = FITS("ToyModelImages/badfibre.fits", "w")
+    write(f,badfibre)
+    close(f)
+    f = FITS("ToyModelImages/badwave.fits", "w")
+    write(f,badwave)
+    close(f)
+    
+
+    println(size(fibre))
+
+    
+
+
+
+
+
+end
+
+using Revise
+using FITSIO, EasyFITS
+using OptimPackNextGen.Powell
+using StatsBase,Statistics
+using InterpolationKernels
+
+function script()
+
+    directory = "/home/unahzaal/Documents/StageM2/SINFONI_DHTAUB/reduceddatadirty/DH_TAU_B/06-11-2007/Step4/"
+    fitsnamefibre = "out_ns_stack_0000.fits"
+    pathf = directory*fitsnamefibre
+
+    path = "/home/unahzaal/Documents/StageM2/SINFONI_DHTAUB/rawdata/"
+    lamp =read(FITS(path*"SINFO.2007-11-07T11:19:43.995.fits")[1])
+    fibre =read(FITS(pathf)[1])
+
+    dark = zeros(Float32,size(lamp)...,3)
+    dark[:,:,1] = read(FITS(path*"SINFO.2007-11-07T10:18:16.606.fits")[1])
+    dark[:,:,2] = read(FITS(path*"SINFO.2007-11-07T10:23:32.890.fits")[1])
+    dark[:,:,3] = read(FITS(path*"SINFO.2007-11-07T10:28:54.896.fits")[1])
+
+    good = median(dark) .-  3*mad(dark) .< mean(dark,dims=3)[205:262,:,1] .< median(dark) .+  3*mad(dark)
+    medimg = mapwindow(median, median(dark,dims=3), (5,1,1)) .- median(dark,dims=3) 
+    good .*= median(medimg) .-  3*mad(medimg) .< median(medimg,dims=3)[205:262,:,1] .< median(medimg) .+  3*mad(medimg)
+
+    lmp = lamp[205:262,:]
+    lmp = convert(Matrix{Float64},lmp)
+    fbr = fibre[205:262,:]
+    fbr = convert(Matrix{Float64},fbr)
+
+
+    #ker = CatmullRomSpline(Float64)
+    #ker = CatmullRomSpline{Float64}() # there is an issue with different version of InterpolationKernels
+    ker = BSpline{3,Float64}()
+    indices =  -999:3000
+    function pcostl(x)
+        p  = projection(Val(:proj),indices, good', lmp', ker,(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j);
+        return -sum(p[find_peaks(p; dist=15,nmax=30)])
+    end
+    function pcostf(x)
+        p  = projection(Val(:proj),indices, good, fbr, ker,(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j);
+        return -sum(p[32:33])
+    end
+
+
+    x = [  0., 0., 0.];
+    (~,xl) = newuoa(pcostl, x, 1.,  1e-6; verbose = 2, maxeval = 500,check=false)
+    (~,xf) = newuoa(pcostf, x, 1.,  1e-6; verbose = 2, maxeval = 500,check=false)
+
+    fcoord(i,j) =  i +  xl[1] + xl[2]*1e-3*j + xl[3]*1e-6*j*j
+    fcoordf(i,j) =  i +  xf[1] + xf[2]*1e-3*j + xf[3]*1e-6*j*j
+
+    spectre  = projection(Val(:proj), indices,good', lmp', ker,fcoord );
+    spectref  = projection(Val(:proj), indices,good, fbr, ker,fcoordf );
+
+    lampmodel = deprojection(spectre,axes(lmp'), ker,fcoord,indices);
+    fibremodel = deprojection(spectref,axes(fbr), ker,fcoordf,indices);
+
+
+    lampmodelnonfit = deprojection(spectre,axes(lmp'), ker,(i,j)->i,indices);
+    fibremodelnonfit = deprojection(spectref,axes(fbr), ker,(i,j)->i,indices);
+
+
+    tlampmodel = copy(lampmodel')
+    tfibremodel = copy(fibremodel')
+
+    f = FITS("ToyModelImages/lampmodel.fits", "w")
+    write(f,lampmodel)
+    close(f)
+    f = FITS("ToyModelImages/lampmodelnonfit.fits", "w")
+    write(f,lampmodelnonfit)
+    close(f)
+    f = FITS("ToyModelImages/lmp.fits", "w")
+    write(f,lmp)
+    close(f)
+    f = FITS("ToyModelImages/reslmp.fits", "w")
+    write(f,Residual(lampmodel,lampmodelnonfit))
+    close(f)
+    f = FITS("ToyModelImages/restrue.fits", "w")
+    write(f,Residual(lmp,tlampmodel))
+    close(f)
+    f = FITS("ToyModelImages/fibremodel.fits", "w")
+    write(f,fibremodel)
+    close(f)
+    f = FITS("ToyModelImages/fibremodelnonfit.fits", "w")
+    write(f,fibremodelnonfit)
+    close(f)
+    f = FITS("ToyModelImages/fbr.fits", "w")
+    write(f,fbr)
+    close(f)
+    f = FITS("ToyModelImages/resfbr.fits", "w")
+    write(f,Residual(fibremodel,fibremodelnonfit))
+    close(f)
+    f = FITS("ToyModelImages/restruef.fits", "w")
+    write(f,Residual(fbr,fibremodel))
+    close(f)
 
 end
