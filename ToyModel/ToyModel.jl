@@ -29,9 +29,9 @@ using SparseArrays
         map::Tuple{AbstractVector{AbstractVector{Int64}},AbstractVector{AbstractVector{Int64}}} #Exponent Map
     )
 
-Structure containing a 2D polynomial of arbitrary order.
-coef is like : ax^2,bxy,cy^2,dx,ey,f (for Order = 2)
-refpix is a reference pixel for mapping
+Structure containing a 2D polynomial of arbitrary `order`.
+`coef` is like : ax^2,bxy,cy^2,dx,ey,f (for Order = 2)
+`refpix` is a reference pixel for mapping
 """
 mutable struct Poly2D
     order::Int64  #order of the polynomial
@@ -71,7 +71,7 @@ function RandCoef(order::Int64)
 end
 
 """
-    ExpMap(coef::AbstractVector{AbstractVector{Float64}})
+    ExpMap(order::Int64)
 
 Set the maps of exponent order for the polynomial 
 
@@ -97,7 +97,7 @@ end
 """
     (self::Poly2D)(x::Float,y::Float)
 
-compute the value of the polyomial Poly2D at coordinates (x,y)
+compute the value of the polyomial Poly2D at coordinates `(x,y)`
 
 Example:
 
@@ -114,7 +114,7 @@ end
 """
     CoefConstraintIdentity!(poly::Poly2D,dim::Int64)
 
-Change the coef value tu ensure identity projection in the dimension dim
+Change the coef value of `poly` to ensure identity projection in the dimension `dim`
 """
 function CoefConstraintIdentity!(poly::Poly2D,dim::Int64)
     mask1 = findall(poly.map[dim] .== 1)
@@ -126,7 +126,8 @@ end
 
 """
     Residual(image1::Matrix{T},image2::Matrix{T}) where T
-Return the residual image between image1 an image2
+
+Return the residual image `image1` minus `image2`
 """
 function Residual(image1::Matrix{T},image2::Matrix{T}) where T
     if size(image1) != size(image2)
@@ -139,7 +140,7 @@ end
 """
     CoefConstraintCustom!(poly::Poly2D,dim::Int64)
 
-Change the coef value tu ensure identity projection in the dimension dim
+Change the coef value of `poly`` to ensure a specific projection in the dimension `dim`
 """
 function CoefConstraintCustom!(poly::Poly2D,dim::Int64)
     mask1 = findall(poly.map[dim] .== 1)
@@ -153,7 +154,7 @@ end
 """
     Contrast(image::Matrix{Float64},dim::Int)
 
-Return the constrast of an image along the dimension Dim (#can be normalized by image lenght in dim dimension)
+Return the `constrast` of an `image` along the dimension `Dim` (#can be normalized by image lenght in `dim` dimension)
 """
 function Contrast(image::Matrix{Float64},dim::Int)
     return sum(image,dims=dim) #./ size(image)[dim]
@@ -164,9 +165,9 @@ end
 
 
 """
-    BadPixMap(fibre::Matrix{Float64},wave::Matrix{Float64})
+    badfibre,badwave = BadPixMap(fibre::Matrix{Float64},wave::Matrix{Float64})
 
-Return a simple bad pixel map from fibre and wave frames. (bad pixels are flagged with 0 weight when outside a median filter) 
+Return a simple `bad pixel map` from `fibre` and `wave` frames. (bad pixels are flagged with 0 weight when outside a median filter) 
 """
 function BadPixMap(fibre::Matrix{Float64},wave::Matrix{Float64})
     #bad pixel map for fibre
@@ -197,7 +198,7 @@ end
 """
     ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D,axes::Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}})
 
-Return a warped tranformed with the 2D Polynomial associated with Poly
+Return a `warped tranformed image` with the 2D Polynomial associated with `Poly`, `axes` mark the warped image frame.
 """
 function ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D,axes::Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}})
 
@@ -210,7 +211,7 @@ end
 """
     ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
 
-Return a warped tranformed with the 2D Polynomial associated with Poly (experimental version with weight map, realy slow and was not extensively tested)
+Return a `warped tranformed image` with the 2D Polynomial associated with `Poly` (experimental version with weight map `wgt`, realy slow and was not extensively tested)
 """
 function ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
 
@@ -245,35 +246,33 @@ end
 """
     OperatorConstruct(ker,funcfbr,funclamp,img)
 
-Construct the sparse matrix M with an interpolation kernel ker, the transformation polynomials funcfbr and funclamp and the original imgae img (for problem dimension)
+Construct the sparse matrix `M` with an interpolation kernel `ker`, the transformation polynomials `funcfbr` and `funclamp` and the original image `img` (for problem dimension)
 The sparse matrix is in a 1D form 
 
 example with identity polynomials: 
 
-funcfbr(i,j) = i
-funclamp(i,j) = j
+funcfbr(i,j) = j
+funclamp(i,j) = i
 ker = InterpolationKernels.BSpline{3,Float64}()
-img = zeros(10,10)
-OperatorConstruct(ker,funcfbr,funclamp,img)
+img = zeros(3,3)
+M = OperatorConstruct(ker,funcfbr,funclamp,img)
 """
-function OperatorConstruct(ker,funcfbr,funclamp,img)
+function OperatorConstruct(ker,funcfbr,funclamp,img::Matrix{Float64})
    
     I = size(img)[1]
     J = size(img)[2]
     L = size(img)[1]
     M = size(img)[2]
-    operator = spzeros(I*J*L*M)
-    for j in 1:J-1
-        for i in 1:I-1
+    operator = spzeros(I*J,L*M)
+    for j in 1:J
+        for i in 1:I
             pl = funclamp(i,j)
             pm = funcfbr(i,j)
-            println(pl)
-            for m in 1:M-1
-                for l in 1:L-1
-                    position = i + I*(j-1) + I*J*(l-1) + I*J*L*(m-1) #linear index
-                    operator[position] = ker(l-pl)*ker(m-pm) 
-                    #println(operator[position],position)
-
+            for l in max(Int.(ceil(pl-2)),1):min(Int.(floor(pm+2)),L)
+                for m in max(Int.(ceil(pm-2)),1):min(Int.(floor(pm+2)),M)
+                    position1 = i + I*(j-1)
+                    position2 = l + L*(m-1)
+                    operator[position1,position2] = ker(l-pl)*ker(m-pm)
                 end
             end
         end
@@ -289,7 +288,7 @@ end
     function CreateTestSlitlet()
 
 
-Return a fake slitlet filled with index of pixels
+Return a `fake slitlet` filled with index of pixels
 """
 function CreateTestSlitlet()
 
@@ -324,7 +323,7 @@ end
 """
     function CreateToySlitlet()
 
-usage : julia> SlitletFibre, SlitletWave = CreateToySlitlet()
+usage : SlitletFibre, SlitletWave = CreateToySlitlet()
 
 Return two fake SINFONI slitlet mimiquing FIBRE and WAVE slitlet
  filled with gaussian simulated signal and added zero margin for deformation space
@@ -389,7 +388,7 @@ end
 """
     AddOutlier!(image::Matrix{Float64},freq::Float64,amp::Float64)
 
-Add outlier to image, probabilitie of an outlier occuring in a pixel is based on the frequency parameter. 
+Add outlier to image, probabilitie of an outlier occuring in a pixel is based on the frequency `freq` parameter and its amplitude on `amp` parameter. 
 
 """
 function AddOutlier!(image::Matrix{Float64},freq::Float64,amp::Float64)
@@ -410,7 +409,7 @@ end
 """
     AddMargin(image::Matrix{Float64},marginv::Int64,marginh::Int64)
 
-Add zero filled margin to an image
+Add zero filled margin to an image. `marginv` is the vetical thicness of above and under margins. `marginh` is the horizontal thicness of left and right margins 
 
 """
 function AddMargin(image::Matrix{Float64},marginv::Int64,marginh::Int64)
@@ -439,7 +438,7 @@ end
 
 usage : DeformedSlitlet,coeff = DeformSlitlet!(OriginalSlitlet, [coeff = rand(Float64,(4,3))])
 
-Return a deformed slitlet using circular permutation. And the coeficients used for deformation
+Return a deformed slitlet using circular permutation. And the coeficients `coeff` used for deformation.
 """
 function DeformSlitlet!(Slitlet, coeff = rand(Float64,(4,3)))
 
@@ -506,7 +505,7 @@ end
     GaussFit(ydata::Vector{Float64},p0::Vector{Float64} = [1., 4.])
 
 Levemberg Marquart fit of a gaussian on an array.
-Take data and initial parameters p0 = [σ,center] and return uptated parameters
+Take `ydata` and initial parameters `p0 = [σ,center]` and return uptated parameters
 
 """
 function GaussFit(ydata::Vector{Float64},p0::Vector{Float64} = [1., 4.])
@@ -521,7 +520,7 @@ end
 """
     function PolynomFitRow(PolyArray)
 
-Take the center of each row/column and return the polynomial least square fitting of it as a [a b c] matrix.
+Take the center of each row/column of `polyarray` and return the polynomial least square fitting of it as a `[a b c]` matrix.
 """
 function PolynomFitRow(PolyArray)
 
@@ -549,7 +548,7 @@ end
 """
     CenterVector(vector::vector{any})
 
-Return the vector center's index (two indexes for even lenght)
+Return the `vector` center's `[index]` (two indexes for even lenght)
 """
 function CenterVector(vector::Vector)
     len = size(vector)[1]
@@ -564,7 +563,7 @@ end
 """
     RayFinding(contrast::Vector{Float64},range::Int64,raynumber::Int64)
 
-Return the raynumber number of gaussian peak index in contrast vector by flatenning contrast around each found peak in the range range.  
+Return the raynumber number of gaussian peak `index` in `contrast` vector by flatenning contrast around each found peak in the `range`.  
 """
 function RayFinding(contrast::Vector{Float64},range::Int64,raynumber::Int64)
 
@@ -595,7 +594,7 @@ end
 """
     RayFinding(contrast::Vector{Float32},range::Int64,raynumber::Int64)
 
-Return the raynumber number of gaussian peak index in contrast vector by flatenning contrast around each found peak in the range range.  
+Return the raynumber number of gaussian peak `index` in `contrast` vector by flatenning contrast around each found peak in the `range`.  
 """
 function RayFinding(contrast::Vector{Float32},range::Int64,raynumber::Int64)
 
@@ -623,9 +622,10 @@ function RayFinding(contrast::Vector{Float32},range::Int64,raynumber::Int64)
 end
 
 """
-    ReformSlitlet(coefvector::Vector{Float64},order::Int64,refpix::Tuple{Int,Int},imageref::Matrix{Float64},imageref2::Matrix{Float64})
+    deformedimage, deformedimage2 = ReformSlitlet(coefvector::Vector{Float64},order::Int64,refpix::Tuple{Int,Int},image::Matrix{Float64},image2::Matrix{Float64},imageref::Matrix{Float64},imageref2::Matrix{Float64})
 
-Reform slitlet and store residual
+Reform slitlet by polynomial deformation with coef `coefvector` from and store (imageref-deformedimage) residual.
+`image and imrageref` reffer to fibre frames and `image2 and imageref2` reffer to wave frames. 
 """
 function ReformSlitlet(coefvector::Vector{Float64},order::Int64,refpix::Tuple{Int,Int},image::Matrix{Float64},image2::Matrix{Float64},imageref::Matrix{Float64},imageref2::Matrix{Float64})
     
@@ -679,6 +679,9 @@ end
     MinCriteria(image::Matrix,order::Int,refpix::Tuple{Int,Int})
 
 Find the polynomials allowing image to be rectified
+`image and imrageref` reffer to fibre frames and `image2 and imageref2` reffer to wave frames. 
+`wgt` is a weight map with the same dimension than image or imageref.
+
 """
 function MinCriteria(image::Matrix{Float64},image2::Matrix{Float64},wgt::Matrix{Float64},order::Int64,refpix::Tuple{Int,Int},imageref::Matrix{Float64},imageref2::Matrix{Float64};fitswriting = false)
 
@@ -1163,7 +1166,7 @@ end
 """
     MultAxes(x::Int64,img::Matrix{Float64})
     
-Return the axes base.OneTo value of an array the size of x time img in every direction
+Return the axes base.OneTo value of an array the size of `x` time `img` dimentions in every direction
 """
 function MultAxes(x::Int64,img::Matrix{Float64})
     y = zeros(size(img) .* x)
@@ -1173,7 +1176,7 @@ end
 """
     ImgFilter(img::Matrix{Float64},uptresh::Float64,downtresh::Float64)
     
-Return the image filtered from points having intensity outsides μ ± σ*boundaries
+Return the image filtered from points having intensity outsides μ ± σ*`boundaries`
 """
 function ImgFilter(img::Matrix{Float64},uptresh::Float64,downtresh::Float64)
 
@@ -1200,7 +1203,7 @@ end
 """
     ImgFilter!(img::Matrix{Float64},uptresh::Float64,downtresh::Float64)
     
-Return the image filtered from points having intensity outsides μ ± σ*boundaries (temper with original image)
+Return the image filtered from points having intensity outsides μ ± σ*`boundaries` (temper with original image)
 """
 function ImgFilter!(img::Matrix{Float64},uptresh::Float64,downtresh::Float64)
 
@@ -1225,7 +1228,7 @@ end
 """
     oldmain()
 
-Obsolete Toy Model
+Obsolete Toy Model with cyclic permutation
 """
 function oldmain()
 
