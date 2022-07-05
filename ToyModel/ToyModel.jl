@@ -17,6 +17,7 @@ using OptimPackNextGen.Powell
 using LocalFilters
 using StatsBase
 using ImageFiltering
+using SparseArrays
 
 
 
@@ -152,7 +153,7 @@ end
 """
     Contrast(image::Matrix{Float64},dim::Int)
 
-Return the constrast of an image along the dimension Dim normalized by image lenght in dim dimension
+Return the constrast of an image along the dimension Dim (#can be normalized by image lenght in dim dimension)
 """
 function Contrast(image::Matrix{Float64},dim::Int)
     return sum(image,dims=dim) #./ size(image)[dim]
@@ -194,6 +195,8 @@ function BadPixMap(fibre::Matrix{Float64},wave::Matrix{Float64})
 end
 
 """
+    ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D,axes::Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}})
+
 Return a warped tranformed with the 2D Polynomial associated with Poly
 """
 function ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D,axes::Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}})
@@ -205,7 +208,9 @@ function ImageWarp(image::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D,axes::Tupl
 end
 
 """
-Return a warped tranformed with the 2D Polynomial associated with Poly
+    ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
+
+Return a warped tranformed with the 2D Polynomial associated with Poly (experimental version with weight map, realy slow and was not extensively tested)
 """
 function ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
 
@@ -218,7 +223,6 @@ function ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Po
     @inbounds for j in 1:J-1
         for i in 1:I-1
             l,m = ϕ((i,j))
-            #println("l-i = $(l-i), m-j = $(m-j)")
             dl = Int(floor(l))-range
             dm = Int(floor(m))-range
             ul = Int(ceil(l))+range
@@ -227,7 +231,6 @@ function ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Po
                 for b in max(1,dl):min(I-1,ul)
                     distance = sqrt(((l-b)^2)+((m-a)^2)) 
                     s = ker(distance)*wgt[b,a]*image[b,a]
-                    #println("distance = $distance, s= $s,image[b,a] = $(image[b,a]), image[i,j] = $(image[i,j]) ")
                     imwarped[i,j] += s
                 end
             end
@@ -240,29 +243,37 @@ function ImageWarp2(image::Matrix{Float64},wgt::Matrix{Float64},Poly1::Poly2D,Po
 end
 
 """
-To be done
-"""
-function OperatorConstruct(wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
+    OperatorConstruct(ker,funcfbr,funclamp,img)
 
-    ϕ(x) = (Poly1(x[1],x[2]),Poly2(x[1],x[2]))
-    ker = CatmullRomSpline()    
-    I = size(wgt)[1]
-    J = size(wgt)[2]
-    A = size(wgt)[1]
-    B = size(wgt)[2]
-    println(size(wgt))
-    operator = zeros(I,J,A,B)
-    range = 5
+Construct the sparse matrix M with an interpolation kernel ker, the transformation polynomials funcfbr and funclamp and the original imgae img (for problem dimension)
+The sparse matrix is in a 1D form 
+
+example with identity polynomials: 
+
+funcfbr(i,j) = i
+funclamp(i,j) = j
+ker = InterpolationKernels.BSpline{3,Float64}()
+img = zeros(10,10)
+OperatorConstruct(ker,funcfbr,funclamp,img)
+"""
+function OperatorConstruct(ker,funcfbr,funclamp,img)
+   
+    I = size(img)[1]
+    J = size(img)[2]
+    L = size(img)[1]
+    M = size(img)[2]
+    operator = spzeros(I*J*L*M)
     for j in 1:J-1
         for i in 1:I-1
-            l,m = ϕ((i,j))
-            #println("l-i = $(l-i), m-j = $(m-j)")
-            for b in 1:B-1
-                for a in 1:A-1
-                    distance = sqrt(((l-b)^2)+((m-a)^2)) 
-                    s = ker(distance)*wgt[b,a]
-                    #println("distance = $distance, s= $s,image[b,a] = $(image[b,a]), image[i,j] = $(image[i,j]) ")
-                    operator[i,j,a,b] += s 
+            pl = funclamp(i,j)
+            pm = funcfbr(i,j)
+            println(pl)
+            for m in 1:M-1
+                for l in 1:L-1
+                    position = i + I*(j-1) + I*J*(l-1) + I*J*L*(m-1) #linear index
+                    operator[position] = ker(l-pl)*ker(m-pm) 
+                    #println(operator[position],position)
+
                 end
             end
         end
@@ -270,7 +281,7 @@ function OperatorConstruct(wgt::Matrix{Float64},Poly1::Poly2D,Poly2::Poly2D)
 
 
 
-    return imwarped
+    return operator
 end
 
 
@@ -378,13 +389,14 @@ end
 """
     AddOutlier!(image::Matrix{Float64},freq::Float64,amp::Float64)
 
-Add outlier to image, probabilitie of an outlier occuring in a pixel is based on a normal law
+Add outlier to image, probabilitie of an outlier occuring in a pixel is based on the frequency parameter. 
 
 """
 function AddOutlier!(image::Matrix{Float64},freq::Float64,amp::Float64)
 
     Dimλ = size(image)[1]
     Dimx = size(image)[2]
+
     max = maximum(image)
     map = rand(Float64,(Dimλ,Dimx))
     mask = findall(map .> freq)
@@ -398,7 +410,7 @@ end
 """
     AddMargin(image::Matrix{Float64},marginv::Int64,marginh::Int64)
 
-Add margin to an image
+Add zero filled margin to an image
 
 """
 function AddMargin(image::Matrix{Float64},marginv::Int64,marginh::Int64)
@@ -747,111 +759,111 @@ function MinCriteria(image::Matrix{Float64},image2::Matrix{Float64},wgt::Matrix{
     weightedfitness(y) = y[1]/size(image)[1] + y[2]/(size(image)[2]*peaknumber)
     """
     """
-    MinCoupled(coefvector::Vector{Float64})
+        MinCoupled(coefvector::Vector{Float64})
 
-Function used for coupled minimisation of fibre and wave frames
-"""
-function MinCoupled(coefvector::Vector{Float64})
+    Function used for coupled minimisation of fibre and wave frames
+    """
+    function MinCoupled(coefvector::Vector{Float64})
 
-    #Bounding
-    for i in 1:size(coefvector)[1]
-        if !(bounds[i][1] < coefvector[i] < bounds[i][2]) 
-            println("Out Of Bounds : $(bounds[i][1]) < $(coefvector[i]) < $(bounds[i][2])")
-            return 0.
+        #Bounding
+        for i in 1:size(coefvector)[1]
+            if !(bounds[i][1] < coefvector[i] < bounds[i][2]) 
+                println("Out Of Bounds : $(bounds[i][1]) < $(coefvector[i]) < $(bounds[i][2])")
+                return 0.
+            end
         end
-    end
+        
+
+        """
+        #allocating memory
+        deformedimage = Array{Float64}(undef, dim1λ, dim1x)
+        contrast = Array{Float64}(undef, dim1x)
+        deformedimage2 = Array{Float64}(undef, dim2λ, dim2x)
+        contrast2 = Array{Float64}(undef, dim2λ)
+        """
+
+        #Reformating input
+        coefmatrix = reshape(coefvector,:,2)
+
+
+        #Creating polynomials
+        Poly1 = Poly2D(order,refpix,vec(coefmatrix[:,1]),genmap)
+        Poly2 = Poly2D(order,refpix,vec(coefmatrix[:,2]),genmap)
+
+
+
+
+        #Deforming image
+        deformedimage = ImageWarp(image,Poly1,Poly2,axess)
+        deformedimage2 = ImageWarp(image2,Poly1,Poly2,axess)
+
+
+        #Calculating criteria of minimisation
+
+        sumdeformedfibre = sum(deformedimage)
+        sumdeformedwave = sum(deformedimage)
     
 
-    """
-    #allocating memory
-    deformedimage = Array{Float64}(undef, dim1λ, dim1x)
-    contrast = Array{Float64}(undef, dim1x)
-    deformedimage2 = Array{Float64}(undef, dim2λ, dim2x)
-    contrast2 = Array{Float64}(undef, dim2λ)
-    """
-
-    #Reformating input
-    coefmatrix = reshape(coefvector,:,2)
+        uprow = convert(Int64,(size(deformedimage)[1]-2048)/2)
+        downrow  = convert(Int64,size(deformedimage)[1]-uprow)
+        upcol = convert(Int64,(size(deformedimage)[2]-64)/2)
+        downcol = convert(Int64,size(deformedimage)[2]-upcol)
+        println("uprow = $uprow downrow = $downrow upcol = $upcol downcol = $downcol")
 
 
-    #Creating polynomials
-    Poly1 = Poly2D(order,refpix,vec(coefmatrix[:,1]),genmap)
-    Poly2 = Poly2D(order,refpix,vec(coefmatrix[:,2]),genmap)
+        contrast = vec(Contrast(deformedimage[uprow:downrow-1,upcol:downcol-1],1))
+        center = CenterVector(contrast)
+        sumgauss = sum(contrast[center .+ 1])
+        stdev = std(vec(Contrast(deformedimage[uprow:downrow-1,upcol:downcol-1],2)))
+        criteria1 = -sumgauss#/stdev
 
+        contrast2 = vec(Contrast(deformedimage2[uprow:downrow-1,upcol:downcol-1],2))
+        sumgauss2 = sum(contrast2[centerwave .- uprow .+ 1])
+        stdevwave = std(vec(contrast2[centerwave .- uprow .+ 1]))
+        centerdef = RayFinding(contrast2,10,peaknumber)
+        centerdiff = sum(abs.((centerdef .^ 2) .- (centerwave .^ 2)))
+        stdev2 = std(vec(Contrast(deformedimage2[uprow:downrow-1,upcol:downcol-1],1)))
+        criteria2 = -sumgauss2#/stdev2
+        println("center = $center,corr = $(center .- uprow),imsize = $(size(deformedimage)), contsize = $(size(contrast)),contsize2 = $(size(contrast2)), centerwave = $centerwave, centerwavecorr = $(centerwave .- uprow) ")
 
+        weight = (sumfibre/sumwave)^2
 
+        criteriasum = (criteria1 + criteria2*weight)#/centerdiff
+        println("centerdiff = $centerdiff")
 
-    #Deforming image
-    deformedimage = ImageWarp(image,Poly1,Poly2,axess)
-    deformedimage2 = ImageWarp(image2,Poly1,Poly2,axess)
-
-
-    #Calculating criteria of minimisation
-
-    sumdeformedfibre = sum(deformedimage)
-    sumdeformedwave = sum(deformedimage)
- 
-
-    uprow = convert(Int64,(size(deformedimage)[1]-2048)/2)
-    downrow  = convert(Int64,size(deformedimage)[1]-uprow)
-    upcol = convert(Int64,(size(deformedimage)[2]-64)/2)
-    downcol = convert(Int64,size(deformedimage)[2]-upcol)
-    println("uprow = $uprow downrow = $downrow upcol = $upcol downcol = $downcol")
-
-
-    contrast = vec(Contrast(deformedimage[uprow:downrow-1,upcol:downcol-1],1))
-    center = CenterVector(contrast)
-    sumgauss = sum(contrast[center .+ 1])
-    stdev = std(vec(Contrast(deformedimage[uprow:downrow-1,upcol:downcol-1],2)))
-    criteria1 = -sumgauss#/stdev
-
-    contrast2 = vec(Contrast(deformedimage2[uprow:downrow-1,upcol:downcol-1],2))
-    sumgauss2 = sum(contrast2[centerwave .- uprow .+ 1])
-    stdevwave = std(vec(contrast2[centerwave .- uprow .+ 1]))
-    centerdef = RayFinding(contrast2,10,peaknumber)
-    centerdiff = sum(abs.((centerdef .^ 2) .- (centerwave .^ 2)))
-    stdev2 = std(vec(Contrast(deformedimage2[uprow:downrow-1,upcol:downcol-1],1)))
-    criteria2 = -sumgauss2#/stdev2
-    println("center = $center,corr = $(center .- uprow),imsize = $(size(deformedimage)), contsize = $(size(contrast)),contsize2 = $(size(contrast2)), centerwave = $centerwave, centerwavecorr = $(centerwave .- uprow) ")
-
-    weight = (sumfibre/sumwave)^2
-
-    criteriasum = (criteria1 + criteria2*weight)#/centerdiff
-    println("centerdiff = $centerdiff")
-
-    #debug and IO
-    iterator += 1
-    if iterator%10 == 0
-        if fitswriting == true
-            if typeof(imageref) == typeof(deformedimage)
-                f = FITS("ToyModelImages/fcrit=$criteria1.fits", "w")
-                write(f,Residual(imageref,deformedimage))
-                close(f)
-                f = FITS("ToyModelImages/sumdeformedfibre=$sumdeformedfibre.fits", "w")
-                write(f,deformedimage)
-                close(f)
-                f = FITS("ToyModelImages/fcontrastcrit=$criteria1.fits", "w")
-                write(f,contrast)
-                close(f)
-            end
-            if typeof(imageref2) == typeof(deformedimage2)
-                f = FITS("ToyModelImages/wcrit=$criteria2.fits", "w")
-                write(f,Residual(imageref2,deformedimage2))
-                close(f)
-                f = FITS("ToyModelImages/sumdeformedwave=$sumdeformedwave.fits", "w")
-                write(f,deformedimage2)
-                close(f)
-                f = FITS("ToyModelImages/wcontrastcrit=$criteria2.fits", "w")
-                write(f,contrast2)
-                close(f)
+        #debug and IO
+        iterator += 1
+        if iterator%10 == 0
+            if fitswriting == true
+                if typeof(imageref) == typeof(deformedimage)
+                    f = FITS("ToyModelImages/fcrit=$criteria1.fits", "w")
+                    write(f,Residual(imageref,deformedimage))
+                    close(f)
+                    f = FITS("ToyModelImages/sumdeformedfibre=$sumdeformedfibre.fits", "w")
+                    write(f,deformedimage)
+                    close(f)
+                    f = FITS("ToyModelImages/fcontrastcrit=$criteria1.fits", "w")
+                    write(f,contrast)
+                    close(f)
+                end
+                if typeof(imageref2) == typeof(deformedimage2)
+                    f = FITS("ToyModelImages/wcrit=$criteria2.fits", "w")
+                    write(f,Residual(imageref2,deformedimage2))
+                    close(f)
+                    f = FITS("ToyModelImages/sumdeformedwave=$sumdeformedwave.fits", "w")
+                    write(f,deformedimage2)
+                    close(f)
+                    f = FITS("ToyModelImages/wcontrastcrit=$criteria2.fits", "w")
+                    write(f,contrast2)
+                    close(f)
+                end
             end
         end
+
+        println("coef1 = $(Poly1.coef), coef2 = $(Poly2.coef), criteria1 = $criteria1, criteria2 = $criteria2 ,weight = $weight, criteriasum = $criteriasum")
+
+        return criteriasum
     end
-
-    println("coef1 = $(Poly1.coef), coef2 = $(Poly2.coef), criteria1 = $criteria1, criteria2 = $criteria2 ,weight = $weight, criteriasum = $criteriasum")
-
-    return criteriasum
-end
     
     """
         Min(coefvector::Vector{Float64})
@@ -976,148 +988,148 @@ end
     end
 
     """
-    MinFibre(coefvector::Vector{Float64})
+        MinFibre(coefvector::Vector{Float64})
 
-Function used for separate minimisation of a fibre frame
-"""
-function MinFibre(coefvector::Vector{Float64})
+    Function used for separate minimisation of a fibre frame
+    """
+    function MinFibre(coefvector::Vector{Float64})
 
-    #allocating memory
-    deformedimage = Array{Float64}(undef, dim1λ, dim1x)
-    contrast = Array{Float64}(undef, dim1x)
+        #allocating memory
+        deformedimage = Array{Float64}(undef, dim1λ, dim1x)
+        contrast = Array{Float64}(undef, dim1x)
 
-    #Reformating input
-    coefvectorcopy = copy(coefvector)
+        #Reformating input
+        coefvectorcopy = copy(coefvector)
 
-    #Pushing zeroth order
-    #push!(coefvectorcopy,refpix[1])
-    #insert!(coefvectorcopy,size(coefvectorcopy)[1],1.)
+        #Pushing zeroth order
+        #push!(coefvectorcopy,refpix[1])
+        #insert!(coefvectorcopy,size(coefvectorcopy)[1],1.)
 
-    
-
-
-    #Creating polynomials
-    Poly1 = polyidx
-    #Poly2 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
-    Poly2.coef =  vec(coefvectorcopy)
+        
 
 
+        #Creating polynomials
+        Poly1 = polyidx
+        #Poly2 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
+        Poly2.coef =  vec(coefvectorcopy)
 
 
-    #Deforming image
-    deformedimage = ImageWarp2(image,wgt,Poly1,Poly2)
-    #Calculating criteria of minimisation
 
 
-    sumdeformedfibre = sum(deformedimage)
-    
-    sumdeformedfibre2 = 0.
-    if sumdeformedfibre < 0.
-        for pix in deformedimage
-            sumdeformedfibre2 += pix
-            if pix < 0.
-                #println(pix)
-            end
-        end 
-    end
-    
-    #println("sumfibre = $sumfibre, sumdeformedfibre = $sumdeformedfibre, sumdeformedfibre2 = $sumdeformedfibre2")
-    println("fcoef1 = $(Poly1.coef), fcoef2 = $(Poly2.coef)")
-
-    contrast = vec(Contrast(deformedimage,1))
-    center = CenterVector(contrast)
-    sumgauss = sum(contrast[center])
-    sumrest = sum(contrast) - sum(contrast[center])
-    stdev = std(vec(Contrast(deformedimage,2)))
-    criteria = -sumgauss/stdev#+sumrest
-    #println("center = $center")
+        #Deforming image
+        deformedimage = ImageWarp2(image,wgt,Poly1,Poly2)
+        #Calculating criteria of minimisation
 
 
-    iterator += 1
-    #debug and IO
-    if sumdeformedfibre < 0.
-        if fitswriting == true
-            if typeof(imageref) == typeof(deformedimage)
-                f = FITS("ToyModelImages/fcrit=$criteria.fits", "w")
-                write(f,Residual(imageref,deformedimage))
-                close(f)
-                f = FITS("ToyModelImages/sumdeformedfibre=$sumdeformedfibre.fits", "w")
-                write(f,deformedimage)
-                close(f)
-                f = FITS("ToyModelImages/fcontrastcrit=$criteria.fits", "w")
-                write(f,contrast)
-                close(f)
+        sumdeformedfibre = sum(deformedimage)
+        
+        sumdeformedfibre2 = 0.
+        if sumdeformedfibre < 0.
+            for pix in deformedimage
+                sumdeformedfibre2 += pix
+                if pix < 0.
+                    #println(pix)
+                end
+            end 
+        end
+        
+        #println("sumfibre = $sumfibre, sumdeformedfibre = $sumdeformedfibre, sumdeformedfibre2 = $sumdeformedfibre2")
+        println("fcoef1 = $(Poly1.coef), fcoef2 = $(Poly2.coef)")
+
+        contrast = vec(Contrast(deformedimage,1))
+        center = CenterVector(contrast)
+        sumgauss = sum(contrast[center])
+        sumrest = sum(contrast) - sum(contrast[center])
+        stdev = std(vec(Contrast(deformedimage,2)))
+        criteria = -sumgauss/stdev#+sumrest
+        #println("center = $center")
+
+
+        iterator += 1
+        #debug and IO
+        if sumdeformedfibre < 0.
+            if fitswriting == true
+                if typeof(imageref) == typeof(deformedimage)
+                    f = FITS("ToyModelImages/fcrit=$criteria.fits", "w")
+                    write(f,Residual(imageref,deformedimage))
+                    close(f)
+                    f = FITS("ToyModelImages/sumdeformedfibre=$sumdeformedfibre.fits", "w")
+                    write(f,deformedimage)
+                    close(f)
+                    f = FITS("ToyModelImages/fcontrastcrit=$criteria.fits", "w")
+                    write(f,contrast)
+                    close(f)
+                end
             end
         end
+
+        return criteria
     end
 
-    return criteria
-end
+    """
+        MinWave(coefvector::Vector{Float64})
 
-"""
-MinWave(coefvector::Vector{Float64})
+    Function used for separate minimisation of a wave frame
+    """
+    function MinWave(coefvector::Vector{Float64})
 
-Function used for separate minimisation of a wave frame
-"""
-function MinWave(coefvector::Vector{Float64})
-
-    #allocating memory
-    deformedimage = Array{Float64}(undef, dim2λ, dim2x)
-    contrast = Array{Float64}(undef, dim2λ)
+        #allocating memory
+        deformedimage = Array{Float64}(undef, dim2λ, dim2x)
+        contrast = Array{Float64}(undef, dim2λ)
 
 
-    #Reformating input
-    coefvectorcopy = copy(coefvector)
+        #Reformating input
+        coefvectorcopy = copy(coefvector)
 
-    #pushing zeroth order
-    #push!(coefvectorcopy,refpix[2])
-    #insert!(coefvectorcopy,size(coefvectorcopy)[1]-1,1.)
-
-
-    #Creating polynomials
-    #Poly1 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
-    Poly1.coef =  vec(coefvectorcopy)
-    Poly2 = polyidy
+        #pushing zeroth order
+        #push!(coefvectorcopy,refpix[2])
+        #insert!(coefvectorcopy,size(coefvectorcopy)[1]-1,1.)
 
 
-    sumdeformedwave = sum(deformedimage)
-    #println("sumwave = $sumwave, sumdeformedwave = $sumdeformedwave")
-    println("wcoef1 = $(Poly1.coef), wcoef2 = $(Poly2.coef)")
+        #Creating polynomials
+        #Poly1 = Poly2D(order,refpix,vec(coefvectorcopy),genmap)
+        Poly1.coef =  vec(coefvectorcopy)
+        Poly2 = polyidy
 
 
-    #Deforming image
-    deformedimage = ImageWarp2(image2,wgt,Poly1,Poly2)
-    #Calculating criteria of minimisation
-
-    contrast = vec(Contrast(deformedimage,2))
-    #println(centerwave)
-    sumgauss = sum(contrast[centerwave])
-    sumrest = sum(contrast) - sum(contrast[centerwave])
-    stdev = std(vec(Contrast(deformedimage,1)))
-    criteria = -sumgauss/stdev#+sumrest
-    #println("centerwave = $centerwave")
+        sumdeformedwave = sum(deformedimage)
+        #println("sumwave = $sumwave, sumdeformedwave = $sumdeformedwave")
+        println("wcoef1 = $(Poly1.coef), wcoef2 = $(Poly2.coef)")
 
 
-    #debug and IO
-    iterator += 1
-    if iterator%1 == 0
-        if fitswriting == true
-            if typeof(imageref2) == typeof(deformedimage)
-                f = FITS("ToyModelImages/wcrit=$criteria.fits", "w")
-                write(f,Residual(imageref2,deformedimage))
-                close(f)
-                f = FITS("ToyModelImages/sumdeformedwave=$sumdeformedwave.fits", "w")
-                write(f,deformedimage)
-                close(f)
-                f = FITS("ToyModelImages/wcontrastcrit=$criteria.fits", "w")
-                write(f,contrast)
-                close(f)
+        #Deforming image
+        deformedimage = ImageWarp2(image2,wgt,Poly1,Poly2)
+        #Calculating criteria of minimisation
+
+        contrast = vec(Contrast(deformedimage,2))
+        #println(centerwave)
+        sumgauss = sum(contrast[centerwave])
+        sumrest = sum(contrast) - sum(contrast[centerwave])
+        stdev = std(vec(Contrast(deformedimage,1)))
+        criteria = -sumgauss/stdev#+sumrest
+        #println("centerwave = $centerwave")
+
+
+        #debug and IO
+        iterator += 1
+        if iterator%1 == 0
+            if fitswriting == true
+                if typeof(imageref2) == typeof(deformedimage)
+                    f = FITS("ToyModelImages/wcrit=$criteria.fits", "w")
+                    write(f,Residual(imageref2,deformedimage))
+                    close(f)
+                    f = FITS("ToyModelImages/sumdeformedwave=$sumdeformedwave.fits", "w")
+                    write(f,deformedimage)
+                    close(f)
+                    f = FITS("ToyModelImages/wcontrastcrit=$criteria.fits", "w")
+                    write(f,contrast)
+                    close(f)
+                end
             end
         end
-    end
 
-    return criteria
-end
+        return criteria
+    end
 
 
 """
@@ -1137,6 +1149,7 @@ end
     #res = optimize(MinCoupled, [coefidentity1;coefidentity2], inner_optimizer, Optim.Options(g_tol = precisionfibre, store_trace = false, show_trace = false, iterations = 10000))
 
     """
+    #Borg moea minimisation
     res = bboptimize(Min2,initial_x; Method=:borg_moea,
     FitnessScheme=ParetoFitnessScheme{2}(is_minimizing=true,aggregator=weightedfitness),
     SearchRange=bounds, NumDimensions=size(initial_x)[1], ϵ=precision,
@@ -1187,7 +1200,7 @@ end
 """
     ImgFilter!(img::Matrix{Float64},uptresh::Float64,downtresh::Float64)
     
-Return the image filtered from points having intensity outsides μ ± σ*boundaries
+Return the image filtered from points having intensity outsides μ ± σ*boundaries (temper with original image)
 """
 function ImgFilter!(img::Matrix{Float64},uptresh::Float64,downtresh::Float64)
 
@@ -1824,13 +1837,21 @@ using OptimPackNextGen.Powell
 using StatsBase,Statistics
 using InterpolationKernels
 
+
+"""
+    script()
+
+Toy Model (sky to detector version)
+"""
 function script()
 
+    #File handling to change for your system
     directory = "/home/unahzaal/Documents/StageM2/SINFONI_DHTAUB/reduceddatadirty/DH_TAU_B/06-11-2007/Step4/"
     fitsnamefibre = "out_ns_stack_0000.fits"
     pathf = directory*fitsnamefibre
-
     path = "/home/unahzaal/Documents/StageM2/SINFONI_DHTAUB/rawdata/"
+
+
     lamp =read(FITS(path*"SINFO.2007-11-07T11:19:43.995.fits")[1])
     fibre =read(FITS(pathf)[1])
 
@@ -1839,6 +1860,7 @@ function script()
     dark[:,:,2] = read(FITS(path*"SINFO.2007-11-07T10:23:32.890.fits")[1])
     dark[:,:,3] = read(FITS(path*"SINFO.2007-11-07T10:28:54.896.fits")[1])
 
+    #median filter
     good = median(dark) .-  3*mad(dark) .< mean(dark,dims=3)[205:262,:,1] .< median(dark) .+  3*mad(dark)
     medimg = mapwindow(median, median(dark,dims=3), (5,1,1)) .- median(dark,dims=3) 
     good .*= median(medimg) .-  3*mad(medimg) .< median(medimg,dims=3)[205:262,:,1] .< median(medimg) .+  3*mad(medimg)
@@ -1851,12 +1873,15 @@ function script()
 
     #ker = CatmullRomSpline(Float64)
     #ker = CatmullRomSpline{Float64}() # there is an issue with different version of InterpolationKernels
+
     ker = BSpline{3,Float64}()
     indices =  -999:3000
+    #lamp cost functions for minimisation
     function pcostl(x)
         p  = projection(Val(:proj),indices, good', lmp', ker,(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j);
         return -sum(p[find_peaks(p; dist=15,nmax=30)])
     end
+    #fibre cost functions for minimisation
     function pcostf(x)
         p  = projection(Val(:proj),indices, good, fbr, ker,(i,j) ->  i + x[1] + x[2]*1e-3*j + x[3]*1e-6*j*j);
         return -sum(p[32:33])
@@ -1864,19 +1889,23 @@ function script()
 
 
     x = [  0., 0., 0.];
+    #minimisation
     (~,xl) = newuoa(pcostl, x, 1.,  1e-6; verbose = 2, maxeval = 500,check=false)
     (~,xf) = newuoa(pcostf, x, 1.,  1e-6; verbose = 2, maxeval = 500,check=false)
 
+    #reconstruction polynomials
     fcoord(i,j) =  i +  xl[1] + xl[2]*1e-3*j + xl[3]*1e-6*j*j
     fcoordf(i,j) =  i +  xf[1] + xf[2]*1e-3*j + xf[3]*1e-6*j*j
 
+    #projection
     spectre  = projection(Val(:proj), indices,good', lmp', ker,fcoord );
     spectref  = projection(Val(:proj), indices,good, fbr, ker,fcoordf );
 
+    #deprojection
     lampmodel = deprojection(spectre,axes(lmp'), ker,fcoord,indices);
     fibremodel = deprojection(spectref,axes(fbr), ker,fcoordf,indices);
 
-
+    #deprojection of non deformed image
     lampmodelnonfit = deprojection(spectre,axes(lmp'), ker,(i,j)->i,indices);
     fibremodelnonfit = deprojection(spectref,axes(fbr), ker,(i,j)->i,indices);
 
